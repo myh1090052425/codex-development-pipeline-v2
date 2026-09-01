@@ -1,101 +1,517 @@
-# Development Pipeline v2 最小运行规范
+# Development Pipeline v2 维护规范
 
-- 状态：`Accepted`（2026-09-01 bootstrap）；runtime 已安装并通过结构、Git/Non-Git 行为、deadline/release、P0-P3 清零与零残留验收。
-- `必须`、`不得`、`BLOCKED` 是硬门禁；证据不足时 fail closed，不得以总结、关键词或口头确认替代。
+**状态：Accepted（2026-09-01 bootstrap）**
 
-## 1. 范围与授权
+这份文档供维护者查阅规则：
 
-- 仅当前会话显式调用 `$development-pipeline-v2` 后运行；一次 run限一个 main、normalized Git/Non-Git root和冻结任务，不推断或跨线程续跑。
-- 首次调用授权同一 scope/architecture内全部本地可逆 Design/TDD/FULL/Review/fix；仅实质扩张或生产、外部、凭据、权限、破坏性、数据、Git history/index风险再确认，其余缩界或 `BLOCKED`。
-- run不留长期状态、不自改、不调用/修改v1、不自动续接；后续任务重新显式调用。
+- 职责与授权：第 2-3 节
+- 文件、权限和版本证据：第 4-8 节
+- agent 状态、容量和超时：第 9 节
+- 设计、TDD 和候选轮次：第 10-12 节
+- 评审与终态：第 13-14 节
+- 安装与验收：第 15-16 节
 
-## 2. 角色与写入边界
+真正交给 Codex 执行的指令位于五个运行时文件中，下文简称 `runtime`。本文件与 runtime 表达同一套合同，但这里优先可读性。
 
-- main是唯一 Coordinator，只读冻结、direct派发、等待、核验、汇总；不写 candidate/test/fix或代writer应用patch。三角色不委派，Design、BASELINE/RED/FULL Verify、Review用fresh agent。
-- `dp-v2-implementer`是同时最多一个的逻辑writer；Verifier不改candidate/tests/inputs，Reviewer不写repo/candidate；两者仅按confinement使用预声明scratch/output。TOML `sandbox_mode`只是请求默认，不证明实际权限。
-- Preflight读取并绑定parent及每个child的actual effective sandbox/permission profile；每个payload含 `effective_confinement=HARD|AUDITED_FULL_ACCESS`。HARD须证明Reviewer实际read-only、Implementer/Verifier为exact-root workspace-write，才可声称平台强制。
-- AUDITED_FULL_ACCESS仅在用户已于parent turn显式选择Full access、任务本地可逆且无check要求hard confinement时允许。角色仍守逻辑边界，commands把HOME/TMP/cache/bytecode等定向到root内预声明scratch，冻结root/protected hashes和tree manifest，禁止外部/凭据/生产/Git危险，并报告“边界非OS强制、不能证明root外零写”；hard-required check即 `BLOCKED(capability-unavailable)`。
-- Coordinator只重放只读snapshot/证据，不重跑test/build；角色不得把AUDITED描述为hard read-only或OS exact-root。
+## 先记住四条原则
 
-## 3. Preflight、复用与 root
+1. **主会话负责协调，不负责写代码。**
+2. **只有 Implementer 可以写 candidate 或 tests；Verifier 只可写冻结的 scratch/output；评审不写文件。**
+3. **没有证据就不继续；边界不清楚就停止。**
+4. **同一候选最多修三轮，不能靠重置计数无限循环。**
 
-- 先读适用 `AGENTS.md`、Git status/最近提交、实现、测试入口、依赖、配置和 dirty paths；Non-Git记录无Git证据。
-- 依次检查 existing implementation/dependency、stdlib/platform，最后才最小新增；新依赖、wrapper、接口、配置或抽象须有当前需求和真实变化轴，LOC/风格不算理由。
-- Git root从调用 cwd按第 4 节 env执行 `git rev-parse --show-toplevel`并取 `realpath`；Non-Git root须由任务明确给出并取 `realpath`，失败即 `BLOCKED`。
-- cwd、write/input/scratch/output须在 root内；逃逸、嵌套repo、submodule、特殊文件、不明symlink或实际 writable root不符即 `BLOCKED`。
-- 首个dispatch前冻结 scope/architecture/batch、write/test/input/output边界、commands/env、cleanup/prohibited/dirty paths及effective confinement；每个lane dispatch前冻结有限deadline/poll，同授权内不再询问，无法枚举即 `BLOCKED`。
-- 保留用户改动，不清理、吸收、覆盖或重置未授权变化；默认不做Git history/index mutation。
+## 1. 一次任务的全貌
 
-## 4. Snapshot 与证据
+只有用户显式调用 `$development-pipeline-v2` 时，流水线才会启动。
 
-- 首个 Git read 起移除 `GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE`，固定 `LC_ALL=C`、`GIT_OPTIONAL_LOCKS=0`；无法排除 poisoned env 或 `HEAD` 不存在即 `BLOCKED`。Coordinator 冻结 literal read-only snapshot profile、commands/env和普通 SHA-256，不造 encoder。
-- Git profile保存 root realpath、`HEAD`、raw NUL `status --porcelain=v1 -z --untracked-files=all`、`ls-files --stage -z`、raw binary `diff --binary --no-ext-diff --no-textconv --no-renames HEAD`、`ls-files --unmerged --stage -z`、声明路径 `--literal-pathspecs ls-files -v -z`及其 absence/type/mode/hash/symlink。scoped `-v`只解析影响工作树语义的 assume-unchanged/skip-worktree；fsmonitor-valid仅是可变缓存位，不入semantic snapshot/fixture且不加 `-f`。
-- 对检测到的 merge/cherry-pick/revert/rebase/sequencer/bisect state路径及目录后代记录 absence/type/mode/content hash/symlink；内容变化即 drift，不自动恢复Git文件，未授权解决该操作即 `BLOCKED`。Skill与三role检查同一profile完整性；允许per-repo literal command/普通SHA，不造新Git协议。
-- 每个actual writable root执行前后生成有序tree manifest，覆盖tracked/untracked/ignored的path/type/mode/hash/symlink；AUDITED另复核protected hashes。全树观察不可行时只能用disposable copy，否则 `BLOCKED`；不得把allowlist声称为Full access平台限制。scratch独立冻结preimage/restore。
-- Verifier 使用 `workspace-write` 时，前后 manifest 只证明无持久 delta，不证明无瞬时写；需要强零写保证的 check 必须实际 hard read-only+scratch 或 disposable copy，否则该 check `BLOCKED`。daemon/delayed child 必须有退出、teardown和最终 manifest证据。
-- Verifier 每条 command 记录 ordinal、argv、cwd/env、start/end snapshot、exit/signal、stdout/stderr raw或 SHA+byte count、dependency skip、outputs/cleanup；缺失、错序、stale或 wrong-scope evidence 均 `BLOCKED`。未归因 drift、越界、undeclared output、非法 test mutation或 restore失败不得清理后继续。
+```text
+启动前检查（Preflight）
+   ↓
+现状验证（BASELINE）：目标已经满足，还是确实需要改？
+   ↓
+失败测试或回归测试准备（RED / CHARACTERIZE）
+   ↓
+实现或修复（GREEN / FIX）
+   ↓
+完整验证（FULL）
+   ↓
+独立评审（Review）
+   ↓
+接受（ACCEPT），或带着完整问题进入下一轮修复
+```
 
-## 5. Desktop worker 生命周期与并发
+一次运行只处理一个明确任务和一个 Git 或 Non-Git 根目录。不会从另一个任务自动续跑，也不会留下长期状态文件。
 
-- Capability gate 只允许 main 实际 direct custom-role spawn/wait/status/close-or-interrupt；禁止 `create_thread`、`fork_thread` 或向 peer task 发消息冒充 lane。run 前须证明三 role可派发、真实 status、close 后 wait=`not_found`、release 后可再次 spawn；缺 direct 能力即 `BLOCKED(capability-unavailable)`，不得自造 token/handle。
-- Coordinator在spawn前冻结payload、分配run内never-used opaque payload_id，核验present/unused及map entry与payload/role/mode/root/write_set一致；通过才spawn并绑定handle+expected ID，失败零dispatch、`BLOCKED`，不hash/持久化。role只检查单一非空、内部一致并原样回显，不知map/reuse；missing/multi/conflict可预先BLOCKED，missing-ID final可无echo。echo不等expected是terminal identity `BLOCKED`，非crash且不replacement；停派、查drift、release，匹配后再查status/evidence。
-- final首行仅允许 Implementer `PASS|BLOCKED`、Verifier `PASS|FAIL_CANDIDATE|BLOCKED`、Reviewer `PASS|VALID_FINDINGS|BLOCKED`；正文满足第 4/8 节证据，Reviewer含 findings或空集。
-- 除上条ID规则外，无final、`errored`、final前 `not_found`、非法首行或缺/矛盾证据均为crash；合法 `BLOCKED`不重派，malformed finding使run `BLOCKED`。
-- terminal后真实 close/release，后续 wait/status=`not_found`可作证明；否则停派并 `BLOCKED(unreleased-agent)`。crash仅在已 release、零未归因 delta/residue时重派一次；writer有 delta或二次 crash即 `BLOCKED`。
-- spawn capacity error 不算 crash或 cycle：若仍有 run-owned active handle，work保持 pending且只在真实 release事件后重试；零 run-owned active时首次失败，或最后一个 release后重试仍失败，立即 `BLOCKED(capacity-unavailable)`。不得忙循环、预设容量或 close/interrupt外部 handle。
-- poll timeout只触发下次观察；`execution_deadline`到期是预授权cancel事件，不伪装为agent结果：停派，interrupt/close该handle；release成功为 `BLOCKED(deadline-exceeded)`，否则 `BLOCKED(unreleased-agent)`优先。用户取消/run-level `BLOCKED`同样停派并释放run-owned handles。
-- 独立只读 lanes尽量并行，candidate writer不并行；写 scratch/output 的 verifier commands串行，纯只读 commands可并行。scratch须预声明、独占、owner清理并恢复 preimage。
+## 2. 主会话与三个 agent 角色
 
-## 6. 可选 Design 门
+| 角色 | 负责什么 | 明确不负责什么 |
+| --- | --- | --- |
+| 主会话（Coordinator） | 理解目标、冻结边界、调度 agent、核验证据、决定是否继续 | 不写 candidate、test 或 fix，不替 writer 应用 patch，也不重跑 test/build |
+| `dp-v2-implementer` | 唯一逻辑 writer，按模式写测试或实现 | 不评审自己，不扩大 write set，不委派 |
+| `dp-v2-verifier` | 运行 BASELINE、RED、FULL，收集独立证据 | 不修复，不修改 candidate、tests 或 inputs；只写冻结的 scratch/output |
+| `dp-v2-reviewer` | 检查设计或候选，报告原始 findings | 不修复，不改变测试，不把个人偏好当问题 |
 
-- 仅高风险/多方案启用Design。Coordinator冻结每份design时分配稳定run-local design_id与line/section anchors，绑定cycle并随全部DESIGN payload提供；不持久化/hash。fresh lanes检查scope/architecture、数据/错误、验证、复用、风险。
-- Coordinator按第8节复核raw `VALID_FINDINGS`；全证伪即PASS且无下一份，仅完整effective P0-P3可合成下一design。
-- 最多三份design且每份重审全部维度；第三份effective finding即 `DESIGN_NOT_ACCEPTED`，全部effective PASS才接受design；实质architecture扩张仍按第1节确认。
+“唯一写入者”表示同一时刻最多只有一个 Implementer 修改文件。
 
-## 7. 批量 TDD 与 Candidate Flow
+测试准备和后续实现可以由不同 Implementer 依次完成，但写入时段不能重叠。
 
-- 每轮冻结完整batch、clear checks、预期原因、test/write paths、commands/order/dependencies；fresh BASELINE Verifier同snapshot逐项分为 `already-satisfied`或target-caused `requires-change`，wrong reason、weak/未执行或环境错误即 `BLOCKED`。
-- all-satisfied且无持久test请求时，冻结target snapshot为 `candidate_cycle=none` review target，`writer_count=0`、`changed_paths=[]`，完整FULL+effective Review PASS直接ACCEPT。只有FULL `FAIL_CANDIDATE`或effective finding非空才建repair；首个合法cycle-forming writer形成cycle1。
-- Implementer payload含 `phase=test-preparation|cycle-forming`、`cycle_effect=NONE|FORM_CANDIDATE`；仅允许RED=test-preparation/NONE、mixed CHARACTERIZE=test-preparation/NONE、standalone/repair CHARACTERIZE及GREEN/FIX=cycle-forming/FORM_CANDIDATE。one writer仅指同时最多一个。
-- mixed先顺序完成全部requires-change RED与already-satisfied持久覆盖CHARACTERIZE test preparation，均NONE；冻结全部tests后，仅GREEN/FIX production delta形成一个cycle。RED可复用strong target failure，否则添加最小test-only batch；整批须执行、无skip/xfail并按冻结原因FAIL，最多三次preparation。
-- CHARACTERIZE只覆盖已满足行为：真实candidate上test PASS，冻结negative fixture/disposable counterfactual上因目标原因FAIL，且无持久candidate/input delta并清理副本；无安全、相关、可重放counterfactual即 `BLOCKED`。其FULL失败后的repair可再次CHARACTERIZE，仅改该test paths、production不变并preserve全部RED targets。
-- RED PASS后冻结tests/targets/commands/evidence；GREEN/FIX只改production且不弱化tests。所有writer遵守phase/effect组合，delta须非空、稳定、完全可归因。
-- 仅FORM_CANDIDATE writer terminal+release且post snapshot/tree manifest稳定后，Coordinator在FULL前原子形成/递增cycle1/2/3；NONE、crash、`BLOCKED`、empty/unattributable delta不递增。FULL failure/effective finding已消耗该cycle。
-- FULL重验regression obligations、RED targets、characterization、affected regression/static/type/build/runtime，并要求稳定snapshot、无持久candidate/input delta、outputs恢复和daemon退出；通过后运行全部Review lanes。
-- no-cycle/cycle1/2合法failure batch重走BASELINE、preparation、一个FORM_CANDIDATE writer、FULL、全Review。cycle3失败后drain并 `CANDIDATE_NOT_ACCEPTED`，禁止下一次FORM_CANDIDATE GREEN/FIX/CHARACTERIZE；preparation writers不属candidate guard。
+三个角色都不能继续委派子 agent。FULL 和 Review 每轮都使用 fresh agent，不能复用上一轮角色的结论。
 
-## 8. Review 与 finding 契约
+## 3. 授权范围
 
-- 每轮Review对同一target snapshot/changed paths/FULL evidence用fresh read-only lanes；core覆盖correctness/scope/error/data flow、TDD/regression、repo consistency、reuse/maintainability/anti-overdesign。
-- 按冻结证据增加适用 security、API、migration、performance、frontend、UX、accessibility lanes；不适用须留理由，专项输出仍受同一 snapshot/finding/复核门禁。
-- 每个finding含ID、P0-P3、dimension、trigger/evidence、impact、constrained fix、clear condition；CANDIDATE location须repo `path:line`，DESIGN须原样使用payload的 `design_id:line|design_id:section` anchor。无现实影响的偏好/LOC不是finding。
-- raw `VALID_FINDINGS` 先保留全部项目；只合并实质原因、影响、修复和 clear condition相同项，同 ID但证据或影响不同仍保留。malformed result/finding、lane `BLOCKED`或未完成直接使 run `BLOCKED`，不得进入复核。
-- Coordinator 对每个结构合法 raw finding独立重放 trigger/evidence和 clear condition，只能以可重放反证标记 `refuted`；其余有效 P0-P3组成 effective finding set，Reviewer不写 fix。
-- effective set为空时该 lane/轮次为 effective PASS，不产生 repair、不增加 candidate/design cycle；非空时只有该完整 set进入下一轮。`ACCEPT`依据全部 lanes的 effective outcome，不能依据未经复核的 raw结论或总结。
+用户调用一次后，同一目标和架构内的本地可逆工作可以完整走完：设计、测试、实现、验证、评审和修复都不需要逐轮确认。
 
-## 9. 终态与交付报告
+只有这些情况需要重新询问：
 
-- run 终态仅为 `ACCEPT`、`DESIGN_NOT_ACCEPTED`、`CANDIDATE_NOT_ACCEPTED` 或 `BLOCKED(reason)`；前三者不得掩盖任何优先发生的 run-level `BLOCKED`。
-- `ACCEPT` 报告 root/scope、最终 snapshot、changed paths、FULL/Review证据、已清零 findings、残余风险和未执行项；其他终态报告最后可信 snapshot、阻塞与 release证据且不自动继续。不得声称未完成的发布、提交或外部交付。
+- 目标或架构发生实质扩张
+- 要接触生产环境或外部系统
+- 涉及凭据、权限、破坏性操作或真实数据风险
+- 要修改 Git history 或 index
 
-## 10. Runtime 交付边界
+普通的下一轮修复、重新运行验证、最终 SHA 都不属于重新授权点。
 
-- runtime 恰好五个文件：`~/.codex/skills/development-pipeline-v2/SKILL.md`、`~/.codex/skills/development-pipeline-v2/agents/openai.yaml`、`~/.codex/agents/dp-v2-implementer.toml`、`~/.codex/agents/dp-v2-reviewer.toml`、`~/.codex/agents/dp-v2-verifier.toml`。
-- 五文件合计不超过 220 个 NF 非空行和 24000 bytes；`openai.yaml` 必须设置 `allow_implicit_invocation: false`。不得创建 `references/`、`scripts/`、hooks、state/manifest 文件或第六交付物，不引用或安装 Ponytail。
-- runtime 不修改上述五文件。protected inputs 还包括 v1 的 `~/.codex/skills/development-pipeline/SKILL.md`、`~/.codex/skills/development-pipeline/agents/openai.yaml`、`~/.codex/config.toml` 和 `~/.codex/AGENTS.md`；安装前后逐字节一致，v1保持 explicit-only。
-- 外部验收可在临时 root创建非交付 fixture/driver，由唯一 owner清理并证明零 residue；`quick_validate.py` 仅证明 Skill结构，不替代行为验收。
+## 4. Preflight：动手前先把边界说清楚
 
-## 11. Bootstrap 行为验收
+主会话必须先读取：
 
-- bootstrap支持时优先隔离 `CODEX_HOME`，但不强制；否则仅当前外部 bootstrap owner可执行 live maintenance，且先证明无其他 active v2 run。每 case冻结 driver/prompt/model/env/input并用真实 direct agent、临时 Git/Non-Git fixture。
-- 写目标前先跑旧 runtime目标 RED且须因目标缺失失败；冻结五目标 exact preimage/absence与 protected inputs，为现存目标建 `0600`备份。唯一 writer只安装五文件，额外目标或 protected drift均失败。
-- 安装后用 fresh direct agent/session证明 hot-load并绑定五文件 SHA。无法证明 hot-load时，只有 external owner可切换到不同 Desktop process generation后继续；没有可验证 reload能力则恢复旧 preimage/absence并 `BLOCKED(reload-required)`。
-- 任一失败/中断都恢复 exact preimage/absence，必要时 reload旧版本，再复核 protected inputs与零 residue；成功才保留 new。该 rollback仅属外部安装事务，不是 runtime对 `BLOCKED` 的恢复机制。
-- fixtures保留 explicit-only、main零写、唯一writer、all-satisfied/mixed、raw findings全证伪、完整TDD/FULL/Review、并发/scratch、Git/Non-Git、release后spawn、live hot-load，以及原 wrong root/escape、undeclared output、缺RED/Verify证据、malformed final、writer crash、P0-P3、capacity/handle和rollback负测。
-- 新增：三个nonempty delta各自FULL失败须形成cycle1/2/3且无第四dispatch，empty/crash不递增；never-final须deadline cancel并release；missing-regression须candidate PASS、counterfactual FAIL、test-only cycle后Review清零。
-- Git/evidence fixtures加入 poisoned env、staged/mode/binary drift、operation-state content-only drift、random ignored output、stale/wrong-scope、write-restore/daemon/scratch冲突；fsmonitor-valid单独变化不阻塞，assume-unchanged/skip-worktree变化必须检出。
-- driver核验平台事件、literal commands、manifest/delta、terminal/release和文件事实，regex仅辅助；无法真实诱发必需 case即 `BLOCKED`。清理后须证明临时 root零 residue、五文件预算合规、protected inputs逐字节不变。
+- 当前目录适用的 `AGENTS.md`
+- Git status 和最近提交
+- 与任务相关的实现、测试入口、依赖和配置
+- 用户已经存在但尚未提交的修改
 
-## 12. 最终接受条件
+接着按以下顺序找方案：
 
-- 仅当最终 snapshot在 FULL/Review起止稳定、FULL与所有 effective lanes PASS、P0-P3为零、handles已 release、outputs已恢复、交付边界与 bootstrap cases通过时 `ACCEPT`；缺失/不可重放证据、drift、undeclared output或双三轮未收敛均不接受。
+1. 仓库里是否已经有可复用实现
+2. 已有依赖是否已经提供能力
+3. 标准库或平台能力是否足够
+4. 最后才新增最小实现
+
+新增依赖、封装层、接口、配置项或抽象时，必须说明它解决的当前需求，以及代码中哪种已经存在的差异需要统一处理。
+
+仅为减少代码行数、符合个人风格或应对不确定的未来需求，都不足以新增它。
+
+在第一个 agent 派发前，必须冻结：
+
+- 目标和验收条件
+- 允许修改的文件与测试文件
+- 只读输入
+- 命令、工作目录、环境、执行顺序和依赖关系
+- 临时输出及其清理责任人
+- 禁止操作
+- 用户已有 dirty paths
+- 每个 lane 的 deadline 和轮询间隔
+- 实际权限模式
+
+任何一项无法枚举时，结果是 `BLOCKED`，不是先写再补手续。
+
+## 5. 根目录和文件边界
+
+Git 仓库从调用目录运行 `git rev-parse --show-toplevel`，再取 `realpath`。Non-Git 任务必须明确给出根目录。
+
+所有 cwd、write paths、inputs、scratch 和 outputs 都必须在该根目录内。以下情况默认停止：
+
+- 路径逃出根目录
+- 不明确的 symlink
+- 意外进入 nested repo 或 submodule
+- 特殊文件无法可靠读取
+- 实际 workspace 与声明根目录不一致
+
+流水线保留用户已有修改，不会清理、吸收、覆盖或 reset 未授权变化。
+
+## 6. 权限模式：不要把默认配置当成事实
+
+Codex subagent 会继承父任务的实时权限设置。因此，agent TOML 中的 `sandbox_mode` 只是默认请求，不能单独证明实际隔离已经生效。
+
+每个 payload 都要带上实际采用的 `effective_confinement`。
+
+### HARD
+
+只有在能证明以下事实时使用：
+
+- Reviewer 实际是 read-only
+- Implementer 和 Verifier 实际只有目标根目录的 workspace-write
+
+此时才可以说边界由平台强制。
+
+### AUDITED_FULL_ACCESS
+
+只有同时满足这些条件时使用：
+
+- 用户已在父任务明确选择 Full access
+- 工作仍是本地、可逆的
+- 当前检查不依赖硬隔离
+
+此模式下必须：
+
+- 继续遵守角色的逻辑写入边界
+- 把 HOME、TMP、cache、bytecode 和命令输出定向到根目录内的预声明 scratch
+- 记录根目录 tree manifest 和受保护文件哈希
+- 禁止外部系统、凭据、生产操作和高风险 Git 操作
+- 在报告中明确写出：边界不是 OS 强制，无法证明根目录外绝对零写入
+
+如果某项检查必须依赖硬隔离，则返回 `BLOCKED(capability-unavailable)`。
+
+## 7. Snapshot：为什么每一步都要确认“还是同一个版本”
+
+测试结果只有在输入没有偷偷变化时才有意义。因此，主会话会为当前任务冻结 snapshot，并要求各角色在关键命令前后重放。
+
+对于所有实际可写根目录，snapshot 至少记录：
+
+- path
+- 文件是否存在
+- type 和 mode
+- 普通文件内容哈希
+- symlink target
+- tracked、untracked 和 ignored 文件
+
+如果无法观察完整可写范围，只能使用 disposable copy；不能把文字中的 allowlist 当成 Full access 的平台隔离。
+
+Verifier 使用 workspace-write 时，前后 snapshot 只能证明“没有持久变化”，不能证明“从来没有瞬时写过”。
+
+需要强零写保证的检查，必须真的使用 read-only candidate 加独立 scratch，或在 disposable copy 中运行。
+
+每条验证命令要记录：
+
+- 执行顺序
+- argv、cwd 和 env
+- 开始与结束 snapshot
+- exit code 或 signal
+- stdout/stderr 原文，或哈希加字节数
+- 因依赖失败而跳过的项目
+- 临时输出、清理和子进程退出情况
+
+证据缺失、顺序不一致、命令范围错误、未声明输出或清理失败都会得到 `BLOCKED`。
+
+## 8. Git 任务需要额外记录什么
+
+从第一次 Git 读取开始，必须：
+
+- 移除 `GIT_DIR`、`GIT_WORK_TREE`、`GIT_INDEX_FILE`
+- 固定 `LC_ALL=C`
+- 固定 `GIT_OPTIONAL_LOCKS=0`
+
+Snapshot 必须原样保存这些 Git 事实。带 `-z` 的输出保留 NUL 分隔，binary diff 保留原始字节，不能先转成普通文本再比较：
+
+- 根目录 realpath 和 `HEAD`
+- `git status --porcelain=v1 -z --untracked-files=all`
+- `git ls-files --stage -z`
+- `git diff --binary --no-ext-diff --no-textconv --no-renames HEAD`
+- `git ls-files --unmerged --stage -z`
+- 声明路径的 `git --literal-pathspecs ls-files -v -z`
+
+除命令输出外，每个声明路径还要记录是否存在、type、mode、内容哈希和 symlink target。
+
+`-v` 只用于识别会改变工作树语义的 assume-unchanged 和 skip-worktree。fsmonitor-valid 是可变缓存位，不进入语义 snapshot，也不增加 `-f` 读取。
+
+如果检测到 merge、cherry-pick、revert、rebase、sequencer 或 bisect，还要记录相关状态文件及目录后代的存在性、type、mode、内容哈希和 symlink target。
+
+状态内容变化就是 drift；流水线不能自动恢复这些 Git 文件。除非任务本身就是处理该 Git 操作，否则停止。
+
+所有实际可写根目录都要保留有序的执行前和执行后 manifest。Scratch 另行记录原始状态，并在结束时恢复到完全相同的状态。
+
+## 9. Agent 生命周期
+
+运行前要确认 Desktop 真的支持：
+
+- 直接派发三个 custom roles
+- 观察真实状态
+- close 或 interrupt
+- close 后再次 wait 得到 `not_found`
+- release 后能继续 spawn
+
+不能用 `create_thread`、`fork_thread` 或给 peer task 发消息来冒充 pipeline lane。
+
+### payload_id
+
+派发 agent 前，主会话先冻结完整 payload，再生成一个仅在本次运行中有效、从不重复且不承载业务含义的 `payload_id`。
+
+主会话在 spawn 前必须确认：
+
+- ID 存在，而且从未使用过
+- 内存映射中的 payload、角色、模式、根目录和可写范围都与本次派发一致
+- 只有上述检查通过，才允许 spawn，并把 handle 与预期 ID 绑定
+
+检查失败时零派发并返回 `BLOCKED`。这张映射只存在于当前运行内，不序列化、不哈希、不持久化。
+
+Agent 只负责收到一个非空、内部一致的 ID，并在最终结果里原样返回。
+
+ID 缺失、多值或内部矛盾时，执行前 `BLOCKED`；缺 ID 的这类结果可以不回显 ID。
+
+如果最终回显与 handle 预期 ID 不一致，主会话将它判为身份不一致的 `BLOCKED`，停止后续派发、检查 drift 并释放 handle。
+
+这种情况不是 crash，也不能通过 replacement 重试。
+
+### 合法首行
+
+| 角色 | 合法首行 |
+| --- | --- |
+| Implementer | `PASS` 或 `BLOCKED` |
+| Verifier | `PASS`、`FAIL_CANDIDATE` 或 `BLOCKED` |
+| Reviewer | `PASS`、`VALID_FINDINGS` 或 `BLOCKED` |
+
+没有 final、`errored`、过早 `not_found`、非法首行或互相矛盾的证据属于 crash。合法 `BLOCKED` 不会被替换。
+
+Crash 只允许替换一次，而且前提是原 handle 已释放、没有未授权变化、没有残留。Writer 已产生 delta 或第二次 crash 时，直接 `BLOCKED`。
+
+每个 agent 结束后，主会话都必须 close/release handle，并通过后续 wait/status=`not_found` 证明释放完成。之后才能派发依赖任务。
+
+无法证明时返回 `BLOCKED(unreleased-agent)`。用户取消或整个运行进入 `BLOCKED` 时，要释放本次运行拥有的全部 handles。
+
+### Capacity 和 deadline
+
+容量不足不算 agent 崩溃，也不占候选轮次。
+
+- 仍有 agent 未完全关闭：等其关闭并释放名额后重试
+- 没有未关闭的 agent，或最后一个关闭后仍失败：`BLOCKED(capacity-unavailable)`
+
+单次状态检查超时不算失败，只会安排下一次观察。只有任务总截止时间到期，主会话才停止新派发并 interrupt/close agent：
+
+- 成功 release：`BLOCKED(deadline-exceeded)`
+- 无法证明 release：`BLOCKED(unreleased-agent)`，优先级更高
+
+独立只读评审可以按真实容量并行。Candidate writers 不能重叠；会写 scratch 的验证命令要串行。
+
+## 10. 可选的 Design 门
+
+只有高风险任务或存在多个实质方案时才启用 Design。
+
+主会话为每份完整设计冻结：
+
+- run-local `design_id`
+- 稳定的 line 或 section anchors
+- 当前 design cycle
+
+所有 DESIGN Reviewer 必须使用同一个 ID 和 anchors。
+
+内存中的设计问题用 `design_id:line` 或 `design_id:section` 定位；代码候选问题继续使用仓库 `path:line`。
+
+最多允许三份完整设计。第三份仍有有效 P0-P3 时，终态是 `DESIGN_NOT_ACCEPTED`。
+
+## 11. TDD 分支
+
+### 11.1 BASELINE
+
+修改前，fresh Verifier 对每个可执行 clear check 分类：
+
+- `already-satisfied`：成功条件已经通过，且没有 skip/xfail
+- `requires-change`：因目标尚未满足而失败
+
+Wrong reason、弱检查、未执行检查或环境错误都不是 `requires-change`，而是 `BLOCKED`。
+
+### 11.2 全部已经满足
+
+如果所有项目都满足，而且没有新增长期测试的要求：
+
+- `candidate_cycle=none`
+- writer 数量为 0
+- `changed_paths=[]`
+- 直接执行 FULL 和 Review
+
+两者都通过时直接 `ACCEPT`。只有 FULL 失败或出现有效 finding，才会建立修复批次；第一个真正形成候选的 writer 从 cycle 1 开始。
+
+### 11.3 RED
+
+需要新行为时，先复用已有的强失败测试；没有时由 Implementer 添加最小 test-only batch。
+
+Fresh RED Verifier 必须确认整批测试：
+
+- 被收集并执行
+- 没有 skip/xfail
+- 因冻结的目标原因失败
+- 没有生产代码变化
+
+最多允许三次完整 RED preparation。RED 本身不形成 candidate cycle。
+
+### 11.4 CHARACTERIZE
+
+行为已经正确、只是缺少长期回归测试时，不制造假的 production RED。
+
+Characterization test 必须：
+
+- 在真实 candidate 上 PASS
+- 在冻结的 negative fixture 或 disposable counterfactual 上因目标原因 FAIL
+- 不留下 candidate/input 持久变化
+- 完整清理临时副本
+
+没有安全、相关、可重放的反例时，结果是 `BLOCKED`。
+
+如果 characterization 在 FULL 中被证明没有判别力，下一轮可以再次只修这些测试文件。生产代码保持不变，所有 RED targets 保留。
+
+### 11.5 Mixed batch
+
+同一任务可能既有真正缺失的行为，又有已经正确但缺回归测试的行为。
+
+这时先顺序完成两类 test preparation：
+
+```text
+RED test preparation                 cycle_effect=NONE
+CHARACTERIZE test preparation        cycle_effect=NONE
+冻结全部 tests
+GREEN / FIX production change        cycle_effect=FORM_CANDIDATE
+```
+
+两个 preparation writer 都不形成 candidate cycle。只有后面的 production delta 形成一个 cycle。
+
+### 11.6 Writer phase 和 cycle_effect
+
+| Mode | Phase | Cycle effect |
+| --- | --- | --- |
+| RED | `test-preparation` | `NONE` |
+| mixed CHARACTERIZE | `test-preparation` | `NONE` |
+| standalone CHARACTERIZE | `cycle-forming` | `FORM_CANDIDATE` |
+| characterization repair | `cycle-forming` | `FORM_CANDIDATE` |
+| GREEN / FIX | `cycle-forming` | `FORM_CANDIDATE` |
+
+只有 `FORM_CANDIDATE` writer 满足以下全部条件时，主会话才在 FULL 前形成或递增 cycle 1、2、3：
+
+- terminal PASS
+- handle 已 release
+- post snapshot 和 tree manifest 稳定
+- delta 非空、完全可归因
+
+Preparation、crash、`BLOCKED`、空 delta 或无法归因的 delta 都不递增。
+
+## 12. FULL 和 candidate cycles
+
+FULL 在一个稳定 snapshot 上重验：
+
+- already-satisfied 回归义务
+- frozen RED targets
+- characterization 证据
+- affected regression
+- static、type、build
+- 必要 runtime checks
+
+依赖失败时可以跳过后继，但必须记录根失败和未执行命令。
+
+Cycle 1 或 2 失败时，把 FULL failures 和有效 findings 合并为一个修复批次。
+
+这个批次重新经过 BASELINE、必要的测试准备、一个 `FORM_CANDIDATE` writer、FULL 和全部 Review。
+
+Cycle 3 仍失败或保留有效 finding 时：
+
+- drain 并 release active handles
+- 终止为 `CANDIDATE_NOT_ACCEPTED`
+- 禁止下一次 `FORM_CANDIDATE` GREEN、FIX 或 CHARACTERIZE
+
+RED 和 mixed preparation writers 不计入这个 guard。
+
+## 13. Review 和 findings
+
+Review 只在 FULL PASS 后开始。核心维度包括：
+
+- correctness、scope、error/data flow
+- TDD 和 regression
+- repository consistency
+- reuse、maintainability、anti-overdesign
+
+Security、API、migration、performance、frontend、UX、accessibility 等维度按证据决定是否加入。不适用时要记录原因。
+
+每个 finding 必须包含：
+
+- ID
+- P0、P1、P2 或 P3
+- dimension
+- 稳定 location
+- 可重放 trigger/evidence
+- impact
+- constrained fix
+- executable clear condition
+
+没有现实正确性、安全、性能、维护、测试或操作影响的风格偏好和 LOC 收益，不是 finding。
+
+Reviewer 返回的是 raw findings。主会话先完整保留它们，不能只留下摘要。
+
+只有原因、影响、完整 constrained fix 和 clear condition 全部相同的项目才可以合并。同一个 ID 如果证据或影响不同，仍然要分别保留。
+
+主会话随后逐项重放证据：
+
+- 有可重放反证：标记为 `refuted`
+- 其余项目：进入 effective finding set
+
+Effective set 为空时，该 lane 为 effective PASS，不产生修复，也不增加 cycle。非空时，只有完整 effective set 可以进入修复批次。
+
+Malformed result、malformed finding、lane `BLOCKED` 或未完成会立即使当前运行 `BLOCKED`，不能继续做 effective 复核。
+
+## 14. 终态
+
+一次运行只能有四类终态：
+
+| 终态 | 含义 |
+| --- | --- |
+| `ACCEPT` | FULL 和全部有效 Review 通过，P0-P3 为零，输出和 handles 已清理 |
+| `DESIGN_NOT_ACCEPTED` | 三份设计仍未收敛 |
+| `CANDIDATE_NOT_ACCEPTED` | 三个 candidate cycles 仍未收敛 |
+| `BLOCKED(reason)` | 权限、证据、边界、环境或生命周期条件不足 |
+
+`ACCEPT` 报告根目录、目标范围、最终 snapshot、changed paths、验证与评审结果、已清除 findings、残余风险和未执行事项。
+
+其他终态报告最后可信 snapshot、直接阻塞证据和 handle release 结果，不会自动续跑。
+
+## 15. Runtime 交付边界
+
+安装到 Codex 的 runtime 恰好五个文件：
+
+```text
+~/.codex/skills/development-pipeline-v2/SKILL.md
+~/.codex/skills/development-pipeline-v2/agents/openai.yaml
+~/.codex/agents/dp-v2-implementer.toml
+~/.codex/agents/dp-v2-reviewer.toml
+~/.codex/agents/dp-v2-verifier.toml
+```
+
+硬限制：
+
+- 最多 220 个非空行
+- 最多 24000 bytes
+- `allow_implicit_invocation: false`
+- Skill 目录不增加 `references/`、`scripts/` 或其他文件
+- 不引用或安装 Ponytail
+- 不修改受保护文件：
+  - `~/.codex/skills/development-pipeline/SKILL.md`
+  - `~/.codex/skills/development-pipeline/agents/openai.yaml`
+  - `~/.codex/config.toml`
+  - `~/.codex/AGENTS.md`
+
+安装前后，四个受保护文件必须逐字节一致；v1 的 `allow_implicit_invocation` 必须继续为 `false`。
+
+仓库里的 README、规范、安装器和 CI 是维护工具，不属于 runtime。
+
+## 16. 安装和 bootstrap 验收
+
+安装前必须：
+
+1. 运行旧 runtime 的目标 RED，证明测试确实能区分 old/new。
+2. 冻结五个目标文件和四个受保护文件的原始状态。记录每个目标文件原本存在还是缺失，并绑定内容 SHA。
+3. 对现有目标创建权限为 `0600` 的备份。
+
+安装后必须使用真实 direct agent 和 fresh session 证明：
+
+- 新五文件已经 hot-load，并与安装 SHA 一致
+- 三个 custom role 可以派发
+- 每个 terminal 后能 release，并由后续 `not_found` 证明
+- 四个受保护文件逐字节不变，v1 仍为 explicit-only
+
+无法证明 hot-load 时，需要切换到可验证的新 Desktop 进程。
+
+做不到就按安装前记录的文件内容或缺失状态恢复旧文件，并返回 `BLOCKED(reload-required)`。安装、验证或中断中的任何失败都必须执行同样的精确回滚。
+
+Bootstrap 行为测试至少覆盖，而且必须检查真实平台事件、literal commands、manifest、delta、terminal 和 release，不能只扫描关键词：
+
+- explicit-only
+- main 零写入和唯一 writer
+- all-satisfied、mixed、RED、CHARACTERIZE、FULL、Review
+- cycle 1/2/3 和无第四个 cycle-forming writer
+- deadline cancel 与 release
+- capacity、wrong root、undeclared output、missing evidence、malformed final
+- Git 和 Non-Git
+- failed-install rollback
+- 三个非空候选依次消耗 cycle 1、2、3，第三次失败后没有下一次 cycle-forming writer
+- empty delta 和 crash 不增加 cycle
+- Git staged/mode/binary、operation-state、assume-unchanged 和 skip-worktree drift
+
+任何必需 case 无法真实诱发时，bootstrap 结果都是 `BLOCKED`，不能用静态检查降级通过。
+
+所有临时 fixture、driver 和 scratch 最终必须不存在。
+
+五个 runtime 文件满足预算、四个受保护文件逐字节不变、最终 Review 的 P0-P3 为零，才可以把规范状态标记为 `Accepted`。

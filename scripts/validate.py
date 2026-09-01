@@ -2,6 +2,7 @@
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
 import tomllib
 
@@ -169,7 +170,7 @@ def validate(root, installed):
 
     if not installed:
         spec = read_regular(root / "docs/development-pipeline-v2-spec.md")
-        if "状态：`Accepted`" not in spec:
+        if not re.search(r"状态[：:]\s*(?:\*\*)?\s*`?Accepted`?", spec):
             fail("spec is not Accepted")
 
     return {
