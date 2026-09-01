@@ -1,0 +1,6 @@
+interface:
+  display_name: "Development Pipeline v2"
+  short_description: "Run an explicit evidence-gated repository workflow"
+  default_prompt: "Use $development-pipeline-v2 to implement this scoped repository change with independent TDD, verification, and review."
+policy:
+  allow_implicit_invocation: false
